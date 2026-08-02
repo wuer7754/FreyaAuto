@@ -2,6 +2,10 @@ const etsyService = require("../integrations/etsy/etsy.service");
 
 const tokenManager = require("../utils/token.manager");
 
+const openaiService = require(
+    "../integrations/openai/openai.service"
+);
+
 async function redirectToEtsy(req, res) {
     try {
         const authUrl = etsyService.buildAuthUrl();
@@ -87,10 +91,115 @@ async function refreshToken(req, res) {
     }
 }
 
+async function rewriteListingDescription(req, res) {
+    try {
+        const listingId = req.params.listingId;
+
+        if (!listingId) {
+            return res
+                .status(400)
+                .json({
+                    error: "Listing ID is required.",
+                });
+        }
+
+        const listing =
+            await etsyService.getListing(listingId);
+
+        const oldDescription = listing.description;
+
+        const newDescription =
+            await openaiService.rewriteListingDescription(
+                listing
+            );
+
+        const updatedListing =
+            await etsyService.updateListingDescription(
+                listingId,
+                newDescription
+            );
+
+        return res.json({
+            success: true,
+            listing_id: listingId,
+            title: listing.title,
+            old_description: oldDescription,
+            new_description: newDescription,
+            updated_listing: updatedListing,
+        });
+    } catch (error) {
+        console.error(
+            "Rewrite listing error:",
+            error.response?.data || error.message
+        );
+
+        return res.status(500).json({
+            success: false,
+            error:
+                error.response?.data ||
+                error.message ||
+                "Failed to rewrite listing.",
+        });
+    }
+}
+
+async function rewriteListingDescription(req, res) {
+    try {
+        const listingId = req.params.listingId;
+
+        if (!listingId) {
+            return res
+                .status(400)
+                .json({
+                    error: "Listing ID is required.",
+                });
+        }
+
+        const listing =
+            await etsyService.getListing(listingId);
+
+        const oldDescription = listing.description;
+
+        const newDescription =
+            await openaiService.rewriteListingDescription(
+                listing
+            );
+
+        const updatedListing =
+            await etsyService.updateListingDescription(
+                listingId,
+                newDescription
+            );
+
+        return res.json({
+            success: true,
+            listing_id: listingId,
+            title: listing.title,
+            old_description: oldDescription,
+            new_description: newDescription,
+            updated_listing: updatedListing,
+        });
+    } catch (error) {
+        console.error(
+            "Rewrite listing error:",
+            error.response?.data || error.message
+        );
+
+        return res.status(500).json({
+            success: false,
+            error:
+                error.response?.data ||
+                error.message ||
+                "Failed to rewrite listing.",
+        });
+    }
+}
+
 module.exports = {
     redirectToEtsy,
     handleCallback,
     getCurrentUser,
     getActiveListings,
     refreshToken,
+    rewriteListingDescription,
 };

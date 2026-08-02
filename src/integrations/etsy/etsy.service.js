@@ -154,10 +154,170 @@ async function  refreshAccessToken(){
     expires_in: newTokenData.expires_in,
 });
 }
+
+async function getActiveListings() {
+    let token = tokenManager.getToken();
+
+    if (!token?.access_token) {
+        throw new Error("Missing access token. Please connect Etsy first.");
+    }
+
+    if (!token?.shop_id) {
+        throw new Error("Missing shop ID. Please load Etsy user information first.");
+    }
+
+    const requestListings = async () => {
+        return axios.get(
+            `https://api.etsy.com/v3/application/shops/${token.shop_id}/listings/active`,
+            {
+                headers: {
+                    Authorization: `Bearer ${token.access_token}`,
+                    "x-api-key": `${process.env.ETSY_CLIENT_ID}:${process.env.ETSY_CLIENT_SECRET}`,
+                },
+                params: {
+                    limit: 25,
+                    offset: 0,
+                },
+            }
+        );
+    };
+
+    try {
+        const response = await requestListings();
+
+        return response.data;
+    } catch (error) {
+        const isExpired =
+            error.response?.data?.error === "invalid_token";
+
+        if (!isExpired) {
+            throw error;
+        }
+
+        console.log("Access token expired. Refreshing...");
+
+        await refreshAccessToken();
+
+        token = tokenManager.getToken();
+
+        const retryResponse = await requestListings();
+
+        return retryResponse.data;
+    }
+}
+async function getListing(listingId) {
+    let token = tokenManager.getToken();
+
+    if (!token?.access_token) {
+        throw new Error(
+            "Missing access token. Please connect Etsy first."
+        );
+    }
+
+    const requestListing = async () => {
+        return axios.get(
+            `https://api.etsy.com/v3/application/listings/${listingId}`,
+            {
+                headers: {
+                    Authorization: `Bearer ${token.access_token}`,
+                    "x-api-key":
+                        `${process.env.ETSY_CLIENT_ID}:` +
+                        `${process.env.ETSY_CLIENT_SECRET}`,
+                },
+            }
+        );
+    };
+
+    try {
+        const response = await requestListing();
+
+        return response.data;
+    } catch (error) {
+        const isExpired =
+            error.response?.status === 401 ||
+            error.response?.data?.error === "invalid_token";
+
+        if (!isExpired) {
+            throw error;
+        }
+
+        await refreshAccessToken();
+
+        token = tokenManager.getToken();
+
+        const retryResponse = await requestListing();
+
+        return retryResponse.data;
+    }
+
+}
+
+async function updateListingDescription(
+    listingId,
+    description
+) {
+    let token = tokenManager.getToken();
+
+    if (!token?.access_token) {
+        throw new Error(
+            "Missing access token. Please connect Etsy first."
+        );
+    }
+
+    if (!description?.trim()) {
+        throw new Error("Description cannot be empty.");
+    }
+
+    const requestUpdate = async () => {
+        const body = new URLSearchParams();
+
+        body.append("description", description);
+
+        return axios.patch(
+            `https://api.etsy.com/v3/application/shops/${token.shop_id}/listings/${listingId}`,
+            body,
+            {
+                headers: {
+                    Authorization: `Bearer ${token.access_token}`,
+                    "x-api-key":
+                        `${process.env.ETSY_CLIENT_ID}:` +
+                        `${process.env.ETSY_CLIENT_SECRET}`,
+                    "Content-Type":
+                        "application/x-www-form-urlencoded; charset=utf-8",
+                },
+            }
+        );
+    };
+
+    try {
+        const response = await requestUpdate();
+
+        return response.data;
+    } catch (error) {
+        const isExpired =
+            error.response?.status === 401 ||
+            error.response?.data?.error === "invalid_token";
+
+        if (!isExpired) {
+            throw error;
+        }
+
+        await refreshAccessToken();
+
+        token = tokenManager.getToken();
+
+        const retryResponse = await requestUpdate();
+
+        return retryResponse.data;
+    }
+}
 module.exports = {
     buildAuthUrl,
     exchangeCodeForToken,
     getCurrentUser,
     refreshAccessToken,
+    getActiveListings,
+    getListing,
+    updateListingDescription,
 };
 
