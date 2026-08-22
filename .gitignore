@@ -1,6 +1,13 @@
 # 依赖目录,不上传到 git
 node_modules
+dist
+.DS_Store
 
 # 保存各种密钥,不上传到 git
 .env
 src/config/token.json
+src/config/description-rotation.json
+src/config/team-users.json
+src/config/team-audit.jsonl
+src/config/oauth-state.json
+src/config/performance-tracking.json

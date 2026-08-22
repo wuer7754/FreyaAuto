@@ -4,7 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev:server": "node --watch server.js",
+    "dev:client": "vite",
+    "build:client": "vite build",
+    "preview:client": "vite preview",
+    "team:user": "node scripts/team-user.js",
+    "test": "node --check server.js && node --check src/auth/team-auth.js && node --check src/analytics/performance-tracker.service.js && node --check src/routes/auth.routes.js && node --check scripts/team-user.js && node --check src/controllers/etsy.controller.js && node --check src/controllers/description-rotation.controller.js && node --check src/automations/description-rotation.service.js && node --check src/integrations/etsy/etsy.service.js && node --check src/integrations/openai/openai.service.js && node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",
@@ -14,6 +20,15 @@
     "axios": "^1.18.1",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "openai": "^6.49.0"
+    "https-proxy-agent": "^9.1.0",
+    "lucide-react": "^1.33.0",
+    "openai": "^6.49.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "undici": "^8.10.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.0",
+    "vite": "^8.2.2"
   }
 }
