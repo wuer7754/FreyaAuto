@@ -5,6 +5,8 @@ dotenv.config();
 const express = require("express");
 const path = require("path");
 const etsyRoutes = require("./src/routes/etsy.routes");
+const socialRoutes = require("./src/routes/social.routes");
+const socialMedia = require("./src/integrations/social/social-media.service");
 const authRoutes = require("./src/routes/auth.routes");
 const teamAuth = require("./src/auth/team-auth");
 const etsyController = require("./src/controllers/etsy.controller");
@@ -32,6 +34,19 @@ const clientDist = path.join(__dirname, "dist", "client");
 app.use("/app", express.static(clientDist));
 app.get("/app", (req, res) => res.redirect("/app/"));
 
+// Buffer must be able to retrieve uploaded media without a team session.
+// Files use unguessable names and only validated raster image formats are accepted.
+app.use(
+    "/social/media/files",
+    express.static(socialMedia.getUploadDirectory(), {
+        immutable: true,
+        maxAge: "30d",
+        setHeaders(response) {
+            response.setHeader("X-Content-Type-Options", "nosniff");
+        },
+    })
+);
+
 app.get("/", (req, res) => {
     res.send('Freya Auto API is running. Open <a href="/app/">Freya Auto</a>.');
 });
@@ -42,6 +57,7 @@ app.get("/oauth/etsy/callback", etsyController.handleCallback);
 
 // 所有读取和修改 Etsy 的接口都需要团队身份。写请求还必须携带 CSRF token。
 app.use("/", teamAuth.requireAuth, teamAuth.requireCsrf, teamAuth.auditChanges, etsyRoutes);
+app.use("/", teamAuth.requireAuth, teamAuth.requireCsrf, teamAuth.auditChanges, socialRoutes);
 
 // 最后启动服务器。导出 startServer 便于做不连接 Etsy 的权限测试。
 function startServer(port = PORT, host) {

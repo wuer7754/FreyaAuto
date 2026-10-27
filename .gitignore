@@ -11,3 +11,11 @@ src/config/team-users.json
 src/config/team-audit.jsonl
 src/config/oauth-state.json
 src/config/performance-tracking.json
+src/config/social-publishing.json
+output/social-uploads/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example

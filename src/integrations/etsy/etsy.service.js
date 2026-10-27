@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const etsyClient = require("../../client/etsy.client");
 const tokenManager = require("../../utils/token.manager");
+const shopDashboard = require("../../analytics/shop-dashboard.service");
 const oauthStateFile = path.join(__dirname, "../../config/oauth-state.json");
 const oauthStateLifetimeMs = 10 * 60 * 1000;
 
@@ -211,6 +212,7 @@ async function getActiveListings() {
                 params: {
                     limit: 25,
                     offset: 0,
+                    includes: "Images",
                 },
             }
         );
@@ -251,6 +253,85 @@ async function getActiveListings() {
         const retryResponse = await requestListingsWithRetry();
 
         return retryResponse.data;
+    }
+}
+
+async function getShopDashboard(days = 30) {
+    let token = tokenManager.getToken();
+    const periodDays = Math.min(Math.max(Number(days) || 30, 1), 365);
+
+    if (!token?.access_token || !token?.shop_id) {
+        throw new Error("Missing Etsy connection. Please reconnect Etsy first.");
+    }
+
+    const requestDashboard = async () => {
+        const headers = {
+            Authorization: `Bearer ${token.access_token}`,
+            "x-api-key": `${process.env.ETSY_CLIENT_ID}:${process.env.ETSY_CLIENT_SECRET}`,
+        };
+        const minCreated = Math.floor(
+            (Date.now() - periodDays * 24 * 60 * 60 * 1000) / 1000
+        );
+        const [shopResponse, listingsResponse, firstReceiptsResponse] =
+            await Promise.all([
+                etsyClient.get(`/v3/application/shops/${token.shop_id}`, {
+                    headers,
+                }),
+                etsyClient.get(
+                    `/v3/application/shops/${token.shop_id}/listings/active`,
+                    { headers, params: { limit: 100, offset: 0 } }
+                ),
+                etsyClient.get(
+                    `/v3/application/shops/${token.shop_id}/receipts`,
+                    {
+                        headers,
+                        params: {
+                            min_created: minCreated,
+                            limit: 100,
+                            offset: 0,
+                            was_canceled: false,
+                        },
+                    }
+                ),
+            ]);
+
+        const receipts = [...(firstReceiptsResponse.data?.results || [])];
+        const receiptCount = Number(firstReceiptsResponse.data?.count) || receipts.length;
+        for (let offset = 100; offset < Math.min(receiptCount, 1000); offset += 100) {
+            const response = await etsyClient.get(
+                `/v3/application/shops/${token.shop_id}/receipts`,
+                {
+                    headers,
+                    params: {
+                        min_created: minCreated,
+                        limit: 100,
+                        offset,
+                        was_canceled: false,
+                    },
+                }
+            );
+            receipts.push(...(response.data?.results || []));
+        }
+
+        return shopDashboard.buildShopDashboard({
+            shop: shopResponse.data,
+            listings: listingsResponse.data?.results || [],
+            receipts,
+            days: periodDays,
+        });
+    };
+
+    try {
+        return await requestDashboard();
+    } catch (error) {
+        const isExpired =
+            error.response?.status === 401 ||
+            error.response?.data?.error === "invalid_token";
+        if (!isExpired) throw error;
+
+        await refreshAccessToken();
+        token = tokenManager.getToken();
+        return requestDashboard();
     }
 }
 async function getListing(listingId) {
@@ -298,6 +379,31 @@ async function getListing(listingId) {
         return retryResponse.data;
     }
 
+}
+
+async function getListingImages(listingId) {
+    let token = tokenManager.getToken();
+    if (!token?.access_token) {
+        throw new Error("Missing access token. Please connect Etsy first.");
+    }
+    const requestImages = () => etsyClient.get(
+        `/v3/application/listings/${listingId}/images`,
+        {
+            headers: {
+                Authorization: `Bearer ${token.access_token}`,
+                "x-api-key": `${process.env.ETSY_CLIENT_ID}:${process.env.ETSY_CLIENT_SECRET}`,
+            },
+        }
+    );
+    try {
+        return (await requestImages()).data;
+    } catch (error) {
+        const isExpired = error.response?.status === 401 || error.response?.data?.error === "invalid_token";
+        if (!isExpired) throw error;
+        await refreshAccessToken();
+        token = tokenManager.getToken();
+        return (await requestImages()).data;
+    }
 }
 
 async function updateListingDescription(
@@ -359,12 +465,171 @@ async function updateListingDescription(
         return retryResponse.data;
     }
 }
+
+function publicApiHeaders() {
+    return {
+        "x-api-key": `${process.env.ETSY_CLIENT_ID}:${process.env.ETSY_CLIENT_SECRET}`,
+    };
+}
+
+async function searchActiveListings(keywords, limit = 24) {
+    const cleanedKeywords = String(keywords || "").trim();
+    if (cleanedKeywords.length < 2) {
+        throw new Error("Enter at least two characters to research Etsy listings.");
+    }
+
+    const response = await etsyClient.get("/v3/application/listings/active", {
+        headers: publicApiHeaders(),
+        params: {
+            keywords: cleanedKeywords,
+            limit: Math.min(Math.max(Number(limit) || 24, 1), 50),
+            sort_on: "score",
+            sort_order: "desc",
+        },
+    });
+
+    return response.data;
+}
+
+async function getListingsByIds(listingIds) {
+    const ids = [...new Set((listingIds || []).map(Number).filter(Number.isInteger))];
+    if (ids.length === 0) return { count: 0, results: [] };
+
+    const response = await etsyClient.get("/v3/application/listings/batch", {
+        headers: publicApiHeaders(),
+        params: {
+            listing_ids: ids.slice(0, 100).join(","),
+            includes: "Images,Shop,BuyerPrice",
+            buyer_country: process.env.ETSY_MARKET_COUNTRY || "US",
+            currency: process.env.ETSY_MARKET_CURRENCY || "USD",
+        },
+    });
+
+    return response.data;
+}
+
+async function updateListingTags(listingId, tags) {
+    let token = tokenManager.getToken();
+    const normalizedTags = [...new Set(
+        (Array.isArray(tags) ? tags : [])
+            .map((tag) => String(tag).trim().replace(/\s+/g, " "))
+            .filter(Boolean)
+    )];
+
+    if (!token?.access_token || !token?.shop_id) {
+        throw new Error("Missing Etsy connection. Please reconnect Etsy first.");
+    }
+    if (normalizedTags.length === 0 || normalizedTags.length > 13) {
+        throw new Error("Choose between 1 and 13 Etsy tags.");
+    }
+    if (normalizedTags.some((tag) => tag.length > 20)) {
+        throw new Error("Each Etsy tag must be 20 characters or fewer.");
+    }
+    if (normalizedTags.some((tag) => !/^[\p{L}\p{N}\p{Zs}'-]+$/u.test(tag))) {
+        throw new Error("Tags may contain letters, numbers, spaces, apostrophes, and hyphens only.");
+    }
+
+    const requestUpdate = () => {
+        const body = new URLSearchParams();
+        body.append("tags", normalizedTags.join(","));
+        return etsyClient.patch(
+            `/v3/application/shops/${token.shop_id}/listings/${listingId}`,
+            body,
+            {
+                headers: {
+                    Authorization: `Bearer ${token.access_token}`,
+                    ...publicApiHeaders(),
+                    "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+                },
+            }
+        );
+    };
+
+    try {
+        const response = await requestUpdate();
+        return response.data;
+    } catch (error) {
+        const isExpired =
+            error.response?.status === 401 ||
+            error.response?.data?.error === "invalid_token";
+        if (!isExpired) throw error;
+
+        await refreshAccessToken();
+        token = tokenManager.getToken();
+        const response = await requestUpdate();
+        return response.data;
+    }
+}
+
+async function updateListingKeywords(listingId, { title, tags }) {
+    let token = tokenManager.getToken();
+    const normalizedTitle = String(title || "").trim().replace(/\s+/g, " ");
+    const normalizedTags = [...new Set(
+        (Array.isArray(tags) ? tags : [])
+            .map((tag) => String(tag).trim().replace(/\s+/g, " "))
+            .filter(Boolean)
+    )];
+
+    if (!token?.access_token || !token?.shop_id) {
+        throw new Error("Missing Etsy connection. Please reconnect Etsy first.");
+    }
+    if (!normalizedTitle || normalizedTitle.length > 140) {
+        throw new Error("Etsy titles must contain between 1 and 140 characters.");
+    }
+    if (normalizedTags.length === 0 || normalizedTags.length > 13) {
+        throw new Error("Choose between 1 and 13 Etsy tags.");
+    }
+    if (normalizedTags.some((tag) => tag.length > 20)) {
+        throw new Error("Each Etsy tag must be 20 characters or fewer.");
+    }
+    if (normalizedTags.some((tag) => !/^[\p{L}\p{N}\p{Zs}'-]+$/u.test(tag))) {
+        throw new Error("Tags may contain letters, numbers, spaces, apostrophes, and hyphens only.");
+    }
+
+    const requestUpdate = () => {
+        const body = new URLSearchParams();
+        body.append("title", normalizedTitle);
+        body.append("tags", normalizedTags.join(","));
+        return etsyClient.patch(
+            `/v3/application/shops/${token.shop_id}/listings/${listingId}`,
+            body,
+            {
+                headers: {
+                    Authorization: `Bearer ${token.access_token}`,
+                    ...publicApiHeaders(),
+                    "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+                },
+            }
+        );
+    };
+
+    try {
+        const response = await requestUpdate();
+        return response.data;
+    } catch (error) {
+        const isExpired =
+            error.response?.status === 401 ||
+            error.response?.data?.error === "invalid_token";
+        if (!isExpired) throw error;
+
+        await refreshAccessToken();
+        token = tokenManager.getToken();
+        const response = await requestUpdate();
+        return response.data;
+    }
+}
 module.exports = {
     buildAuthUrl,
     exchangeCodeForToken,
     getCurrentUser,
     refreshAccessToken,
     getActiveListings,
+    getShopDashboard,
     getListing,
+    getListingImages,
     updateListingDescription,
+    searchActiveListings,
+    getListingsByIds,
+    updateListingTags,
+    updateListingKeywords,
 };

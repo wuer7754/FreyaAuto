@@ -27,8 +27,13 @@ router.post(
 );
 
 router.get("/etsy/listings", etsyController.getActiveListings);
+router.get("/etsy/listings/:listingId/images", etsyController.getListingImages);
+
+router.get("/etsy/dashboard", etsyController.getShopDashboard);
 
 router.get("/etsy/performance", etsyController.getPerformance);
+
+router.get("/etsy/market/search", etsyController.researchMarket);
 
 router.post(
     "/etsy/performance/import",
@@ -52,6 +57,18 @@ router.patch(
     "/etsy/listings/:listingId/description",
     teamAuth.requireRole("editor"),
     etsyController.updateListingDescription
+);
+
+router.patch(
+    "/etsy/listings/:listingId/tags",
+    teamAuth.requireRole("editor"),
+    etsyController.updateListingTags
+);
+
+router.patch(
+    "/etsy/listings/:listingId/keywords",
+    teamAuth.requireRole("editor"),
+    etsyController.updateListingKeywords
 );
 
 router.get(

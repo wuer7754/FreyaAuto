@@ -21,8 +21,7 @@ if (proxyUrl) {
     // 注意：如果代理 URL 包含账号或密码，不应将该日志公开。
     console.log(`✅ OpenAI proxy enabled: ${proxyUrl}`);
 
-    // undici 的 ProxyAgent 必须与 undici.fetch 配套传给 OpenAI SDK，
-    // dispatcher 才能将 SDK 发出的 HTTPS 请求转发到指定代理。
+    // 文字请求继续使用 OpenAI SDK 与同一 undici 代理实现。
     openaiOptions.fetch = fetch;
     openaiOptions.fetchOptions = {
         dispatcher: new ProxyAgent(proxyUrl),
@@ -467,8 +466,192 @@ Do not force generic features into the listing if they are not supported by the 
     return rewrittenDescription;
 }
 
+function parseJsonObject(value) {
+    const source = String(value || "").trim();
+    const cleaned = source
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/, "");
+    try {
+        return JSON.parse(cleaned);
+    } catch {
+        const start = cleaned.indexOf("{");
+        const end = cleaned.lastIndexOf("}");
+        if (start >= 0 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
+        throw new Error("OpenAI returned social copy in an invalid format.");
+    }
+}
+
+async function generateSocialCopy(listing, brief = "") {
+    if (!listing?.title) throw new Error("Listing title is missing.");
+    const response = await openai.responses.create({
+        model: "gpt-5.6",
+        instructions: [
+            BRAND_VOICE,
+            FACT_RULES,
+            `You write channel-specific organic social copy for Freya Furniture.
+Return one valid JSON object only, with exactly these string keys:
+instagramCaption, facebookText.
+
+Instagram: an engaging caption with a strong first line, a short lifestyle story, a gentle CTA, and 4-7 relevant hashtags. Maximum 2200 characters.
+Facebook: conversational opening hook plus useful product context and a gentle CTA. Do not invent a separate headline. Maximum 5000 characters.
+
+Never invent discounts, scarcity, materials, dimensions, installation details, or shipping claims.`,
+        ].join("\n\n"),
+        input: `Product title:\n${listing.title}\n\nCurrent description:\n${listing.description || "Not provided"}\n\nTags:\n${listing.tags?.join(", ") || "Not provided"}\n\nCreative direction from the seller:\n${String(brief || "Warm, inviting, design-focused organic promotion.").slice(0, 1200)}`,
+    });
+    const copy = parseJsonObject(response.output_text);
+    const required = ["instagramCaption", "facebookText"];
+    if (required.some((key) => !String(copy?.[key] || "").trim())) {
+        throw new Error("OpenAI returned incomplete social copy.");
+    }
+    return {
+        instagramCaption: String(copy.instagramCaption).trim().slice(0, 2200),
+        facebookText: String(copy.facebookText).trim().slice(0, 5000),
+    };
+}
+
+async function generateSocialQueueCopy(listing, items = [], brief = "") {
+    if (!listing?.title) throw new Error("Listing title is missing.");
+    if (!Array.isArray(items) || !items.length || items.length > 14) {
+        throw new Error("Choose between 1 and 14 weekly images.");
+    }
+    const normalizedItems = items.map((item, index) => ({
+        day: index + 1,
+        label: String(item?.label || `Image ${index + 1}`).slice(0, 180),
+    }));
+    const response = await openai.responses.create({
+        model: "gpt-5.6",
+        instructions: [
+            BRAND_VOICE,
+            FACT_RULES,
+            `Create a varied weekly organic social campaign for one Freya Furniture product.
+Return one valid JSON object only with a "posts" array. Each item must contain exactly two strings: instagramCaption and facebookText.
+Return exactly one item for every supplied day, in the same order.
+
+Each day must feel genuinely different:
+- use a different opening hook and sentence structure;
+- rotate the editorial angle between room styling, shape, atmosphere, practical placement, design detail, and discovery;
+- do not repeat the same CTA;
+- vary relevant Instagram hashtags while keeping them truthful;
+- never claim that the image shows something merely because its filename suggests it;
+- avoid fake urgency, discounts, and unsupported product claims.
+
+Instagram captions must be under 2200 characters and include 4-7 hashtags.
+Facebook text must be under 5000 characters and should not use a separate headline field.`,
+        ].join("\n\n"),
+        input: `Product title:\n${listing.title}\n\nCurrent description:\n${listing.description || "Not provided"}\n\nTags:\n${listing.tags?.join(", ") || "Not provided"}\n\nSeller direction:\n${String(brief || "Warm, varied, design-focused weekly promotion.").slice(0, 1200)}\n\nWeekly images:\n${JSON.stringify(normalizedItems)}`,
+    });
+    const parsed = parseJsonObject(response.output_text);
+    if (!Array.isArray(parsed?.posts) || parsed.posts.length !== normalizedItems.length) {
+        throw new Error("OpenAI returned an incomplete weekly campaign.");
+    }
+    return parsed.posts.map((post) => {
+        if (!String(post?.instagramCaption || "").trim() || !String(post?.facebookText || "").trim()) {
+            throw new Error("OpenAI returned incomplete weekly copy.");
+        }
+        return {
+            instagramCaption: String(post.instagramCaption).trim().slice(0, 2200),
+            facebookText: String(post.facebookText).trim().slice(0, 5000),
+        };
+    });
+}
+
+async function downloadEtsyImage(url, index) {
+    const parsed = new URL(String(url || ""));
+    if (parsed.protocol !== "https:" || !parsed.hostname.endsWith("etsystatic.com")) {
+        throw new Error("Only official Etsy listing images can be used as product references.");
+    }
+    const response = await fetch(parsed, {
+        dispatcher: openaiOptions.fetchOptions?.dispatcher,
+        headers: { "User-Agent": "FreyaAuto/1.0" },
+    });
+    if (!response.ok) throw new Error(`Etsy image ${index + 1} could not be downloaded.`);
+    const mimeType = String(response.headers.get("content-type") || "image/jpeg").split(";")[0];
+    if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType)) {
+        throw new Error(`Etsy image ${index + 1} has an unsupported format.`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length || buffer.length > 20 * 1024 * 1024) {
+        throw new Error(`Etsy image ${index + 1} is missing or too large.`);
+    }
+    return { buffer, mimeType, filename: `etsy-product-${index + 1}.${mimeType.split("/")[1].replace("jpeg", "jpg")}` };
+}
+
+async function generateSocialImage({ productImageUrls, backgroundImage, prompt, size = "1024x1024" }) {
+    const urls = Array.isArray(productImageUrls) ? productImageUrls.slice(0, 4) : [];
+    if (!urls.length) throw new Error("Select at least one Etsy product image.");
+    const scenePrompt = String(prompt || "").trim();
+    if (scenePrompt.length < 8) throw new Error("Describe the social image you want to create.");
+    const allowedSizes = new Set(["1024x1024", "1024x1536", "1536x1024"]);
+    if (!allowedSizes.has(size)) throw new Error("Choose a supported social image format.");
+
+    // Download official Etsy assets ourselves and send them as data URLs.
+    // OpenAI's remote image fetch can time out on etsystatic.com even when the
+    // Freya Auto server can retrieve the same file immediately.
+    const productSources = await Promise.all(urls.map(downloadEtsyImage));
+    const backgroundIndex = backgroundImage ? urls.length + 1 : null;
+    const content = [
+        {
+            type: "input_text",
+            text: `Use case: ads-marketing
+Asset type: organic Instagram and Facebook product image
+Primary request: ${scenePrompt}
+Input images: Images 1-${urls.length} are authoritative product references for the same mirror.${backgroundIndex ? ` Image ${backgroundIndex} is a background/scene reference.` : ""}
+Subject: reproduce the exact Freya Furniture mirror shown in the Etsy product references.
+Composition: create one polished social-media-ready lifestyle photograph with a clear focal point and natural interior scale.
+Product invariants: preserve the mirror silhouette, frame geometry, frame color, visible material character, proportions, and edge details. Do not redesign, duplicate, stretch, crop through, or add ornament to the mirror.
+Scene rule: ${backgroundImage ? "Use the background reference for the room language and composition, but integrate the exact mirror naturally with matched perspective, shadows, reflections, and lighting." : "Create a believable interior scene matching the seller's direction."}
+Constraints: photorealistic interior photography; truthful product representation; no people; no logos; no watermark; no invented promotional badge; no text unless the seller explicitly requested exact text in the primary request.`,
+        },
+        ...productSources.map((source) => ({
+            type: "input_image",
+            image_url: `data:${source.mimeType};base64,${source.buffer.toString("base64")}`,
+        })),
+    ];
+    if (backgroundImage) {
+        content.push({
+            type: "input_image",
+            image_url: `data:${backgroundImage.mimeType};base64,${backgroundImage.buffer.toString("base64")}`,
+        });
+    }
+
+    let response = await openai.responses.create({
+        model: process.env.OPENAI_SOCIAL_IMAGE_MODEL || "gpt-5.6",
+        input: [{ role: "user", content }],
+        tools: [{
+            type: "image_generation",
+            size,
+            quality: "medium",
+            output_format: "jpeg",
+            output_compression: 92,
+            background: "opaque",
+        }],
+        tool_choice: { type: "image_generation" },
+        background: true,
+    });
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (["queued", "in_progress"].includes(response.status)) {
+        if (Date.now() >= deadline) {
+            throw new Error("OpenAI image generation is still running after 10 minutes. Try again later.");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        response = await openai.responses.retrieve(response.id);
+    }
+    if (response.status !== "completed") {
+        const detail = response.error?.message || response.incomplete_details?.reason;
+        throw new Error(detail || `OpenAI image generation ended with status: ${response.status}.`);
+    }
+    const imageCall = response.output?.find((item) => item.type === "image_generation_call");
+    const encoded = imageCall?.result;
+    if (!encoded) throw new Error("OpenAI did not return a generated image.");
+    return { buffer: Buffer.from(encoded, "base64"), mimeType: "image/jpeg" };
+}
+
 // 只公开业务层需要调用的方法，隐藏 SDK 客户端和代理配置细节。
 module.exports = {
+    generateSocialCopy,
+    generateSocialQueueCopy,
+    generateSocialImage,
     rewriteListingDescription,
     getDescriptionTemplates,
     getDescriptionTemplate,

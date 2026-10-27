@@ -25,6 +25,10 @@ const WEEKDAYS = [
 
 const DEFAULT_CONFIG = {
     enabled: false,
+    // weekly-all preserves the original behavior. daily-batch updates only
+    // three chosen listings, then continues from this cursor tomorrow.
+    mode: "weekly-all",
+    batchSize: 3,
     listingIds: [],
     templateIds: ["signature", "minimal"],
     weekday: 1,
@@ -32,6 +36,8 @@ const DEFAULT_CONFIG = {
     minute: 0,
     timezone: "America/New_York",
     nextTemplateIndex: 0,
+    nextListingIndex: 0,
+    lastBatchListingIds: [],
     lastRunKey: null,
     lastRunAt: null,
     updatedAt: null,
@@ -107,9 +113,20 @@ function getZonedParts(date, timezone) {
 
 function getMostRecentRunKey(config, date = new Date()) {
     const parts = getZonedParts(date, config.timezone);
-    let daysBack = (parts.weekday - config.weekday + 7) % 7;
     const currentMinutes = parts.hour * 60 + parts.minute;
     const scheduledMinutes = config.hour * 60 + config.minute;
+
+    if (config.mode === "daily-batch") {
+        const scheduledDate = new Date(
+            Date.UTC(parts.year, parts.month - 1, parts.day)
+        );
+        if (currentMinutes < scheduledMinutes) {
+            scheduledDate.setUTCDate(scheduledDate.getUTCDate() - 1);
+        }
+        return scheduledDate.toISOString().slice(0, 10);
+    }
+
+    let daysBack = (parts.weekday - config.weekday + 7) % 7;
 
     if (daysBack === 0 && currentMinutes < scheduledMinutes) {
         daysBack = 7;
@@ -144,6 +161,8 @@ function normalizeConfigInput(input, current) {
     const minute = Number(input.minute);
     const timezone = String(input.timezone || "");
     const enabled = input.enabled === true;
+    const mode =
+        input.mode === "daily-batch" ? "daily-batch" : "weekly-all";
 
     if (listingIds.length > 25) {
         throw new Error("A maximum of 25 listings can be rotated at once.");
@@ -168,6 +187,7 @@ function normalizeConfigInput(input, current) {
     }
 
     const scheduleChanged =
+        current.mode !== mode ||
         current.weekday !== weekday ||
         current.hour !== hour ||
         current.minute !== minute ||
@@ -176,6 +196,8 @@ function normalizeConfigInput(input, current) {
     const next = {
         ...current,
         enabled,
+        mode,
+        batchSize: 3,
         listingIds,
         templateIds,
         weekday,
@@ -184,6 +206,8 @@ function normalizeConfigInput(input, current) {
         timezone,
         nextTemplateIndex:
             current.nextTemplateIndex % Math.max(templateIds.length, 1),
+        nextListingIndex:
+            current.nextListingIndex % Math.max(listingIds.length, 1),
         updatedAt: new Date().toISOString(),
     };
 
@@ -200,9 +224,14 @@ function getPublicConfig() {
     return {
         ...config,
         templates: openaiService.getDescriptionTemplates(),
-        scheduleLabel: `Every ${WEEKDAYS[config.weekday]} at ${String(
-            config.hour
-        ).padStart(2, "0")}:${String(config.minute).padStart(2, "0")} (${config.timezone})`,
+        scheduleLabel:
+            config.mode === "daily-batch"
+                ? `Every day at ${String(config.hour).padStart(2, "0")}:${String(
+                      config.minute
+                  ).padStart(2, "0")} (${config.timezone}) · next 3 listings`
+                : `Every ${WEEKDAYS[config.weekday]} at ${String(
+                      config.hour
+                  ).padStart(2, "0")}:${String(config.minute).padStart(2, "0")} (${config.timezone})`,
     };
 }
 
@@ -227,8 +256,28 @@ async function executeRotation(config, runKey) {
         startedAt: new Date().toISOString(),
         completedAt: null,
         status: "running",
+        mode: config.mode,
+        batchListingIds: [],
         results: [],
     };
+
+    const orderedListingIds =
+        config.mode === "daily-batch"
+            ? Array.from(
+                  {
+                      length: Math.min(
+                          config.batchSize,
+                          config.listingIds.length
+                      ),
+                  },
+                  (_, offset) =>
+                      config.listingIds[
+                          (config.nextListingIndex + offset) %
+                              config.listingIds.length
+                      ]
+              )
+            : config.listingIds;
+    run.batchListingIds = orderedListingIds;
 
     // 先占用本周执行键，防止进程中途退出后重复修改同一批 Listing。
     const claimedConfig = {
@@ -239,7 +288,32 @@ async function executeRotation(config, runKey) {
     };
     writeConfig(claimedConfig);
 
-    for (const listingId of config.listingIds) {
+    // Before replacing today's group with tomorrow's group, record the current
+    // views for yesterday's three. This is deliberately limited to that batch:
+    // it never refreshes every selected listing.
+    if (
+        config.mode === "daily-batch" &&
+        Array.isArray(config.lastBatchListingIds) &&
+        config.lastBatchListingIds.length
+    ) {
+        try {
+            const previousBatch = await Promise.all(
+                config.lastBatchListingIds.map((listingId) =>
+                    etsyService.getListing(listingId)
+                )
+            );
+            performanceTracker.syncListings(previousBatch);
+        } catch (error) {
+            // A measurement failure must not prevent the next three scheduled
+            // description updates. The next daily run can attempt it again.
+            console.error(
+                "Daily batch performance snapshot failed:",
+                error.response?.data || error.message
+            );
+        }
+    }
+
+    for (const listingId of orderedListingIds) {
         try {
             const listing = await etsyService.getListing(listingId);
             const description =
@@ -254,7 +328,10 @@ async function executeRotation(config, runKey) {
                 listingId,
                 title: listing.title,
                 viewsBefore: listing.views,
-                source: "weekly-rotation",
+                source:
+                    config.mode === "daily-batch"
+                        ? "daily-batch-rotation"
+                        : "weekly-rotation",
                 updatedBy: "scheduler",
                 templateId,
                 runId: run.id,
@@ -297,6 +374,15 @@ async function executeRotation(config, runKey) {
         ...latest,
         nextTemplateIndex:
             (config.nextTemplateIndex + 1) % config.templateIds.length,
+        nextListingIndex:
+            config.mode === "daily-batch"
+                ? (config.nextListingIndex + orderedListingIds.length) %
+                  config.listingIds.length
+                : config.nextListingIndex,
+        lastBatchListingIds:
+            config.mode === "daily-batch"
+                ? orderedListingIds
+                : config.lastBatchListingIds,
         history: (latest.history || []).map((item) =>
             item.id === run.id ? run : item
         ),
@@ -333,7 +419,7 @@ function startDescriptionRotationScheduler() {
     const check = () => {
         checkForDueRotation().catch((error) => {
             console.error(
-                "Weekly description rotation scheduler error:",
+                "Description rotation scheduler error:",
                 error.message
             );
         });

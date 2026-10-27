@@ -8,6 +8,9 @@ const openaiService = require(
 const performanceTracker = require(
     "../analytics/performance-tracker.service"
 );
+const marketIntelligence = require(
+    "../analytics/market-intelligence.service"
+);
 
 function getErrorMessage(error, fallback) {
     return (
@@ -92,8 +95,6 @@ async function getActiveListings(req, res) {
         const listingItems = Array.isArray(listings)
             ? listings
             : listings?.results || [];
-        performanceTracker.syncListings(listingItems);
-
         res.json(listings);
     } catch (error) {
         console.error(
@@ -103,6 +104,29 @@ async function getActiveListings(req, res) {
 
         res.status(error.response?.status || 502).json({
             error: getErrorMessage(error, "Failed to get Etsy listings."),
+        });
+    }
+}
+
+async function getShopDashboard(req, res) {
+    try {
+        return res.json(await etsyService.getShopDashboard(req.query?.days));
+    } catch (error) {
+        console.error("Get Etsy shop dashboard error:", error.response?.data || error.message);
+        return res.status(error.response?.status || 502).json({
+            error: getErrorMessage(error, "Failed to load Etsy shop dashboard."),
+        });
+    }
+}
+
+async function getListingImages(req, res) {
+    try {
+        const data = await etsyService.getListingImages(req.params.listingId);
+        const images = Array.isArray(data) ? data : data?.results || [];
+        return res.json({ images });
+    } catch (error) {
+        return res.status(error.response?.status || 502).json({
+            error: getErrorMessage(error, "Failed to load Etsy listing images."),
         });
     }
 }
@@ -317,15 +341,123 @@ function importLegacyPerformance(req, res) {
     }
 }
 
+async function researchMarket(req, res) {
+    try {
+        const keywords = String(req.query?.keywords || "").trim();
+        const token = tokenManager.getToken();
+        const result = await marketIntelligence.researchMarket(
+            keywords,
+            token?.shop_id,
+            req.query?.limit
+        );
+        return res.json(result);
+    } catch (error) {
+        console.error("Etsy market research error:", error.response?.data || error.message);
+        return res.status(error.response?.status || 502).json({
+            error: getErrorMessage(error, "Failed to research Etsy search results."),
+        });
+    }
+}
+
+async function updateListingTags(req, res) {
+    try {
+        const listingId = Number(req.params.listingId);
+        const tags = req.body?.tags;
+        if (!Number.isInteger(listingId) || listingId <= 0) {
+            return res.status(400).json({ error: "A valid listing ID is required." });
+        }
+
+        const listing = await etsyService.getListing(listingId);
+        const updatedListing = await etsyService.updateListingTags(listingId, tags);
+        performanceTracker.recordUpdate({
+            listingId,
+            title: listing.title,
+            viewsBefore: listing.views,
+            source: "keyword-update",
+            updatedBy: req.teamUser?.username || "unknown",
+        });
+
+        return res.json({
+            success: true,
+            listingId,
+            tags: Array.isArray(updatedListing?.tags) ? updatedListing.tags : tags,
+            updatedListing,
+        });
+    } catch (error) {
+        console.error("Update Etsy tags error:", error.response?.data || error.message);
+        return res.status(error.response?.status || 400).json({
+            error: getErrorMessage(error, "Failed to update Etsy tags."),
+        });
+    }
+}
+
+async function updateListingKeywords(req, res) {
+    try {
+        const listingId = Number(req.params.listingId);
+        const title = req.body?.title;
+        const tags = req.body?.tags;
+        if (!Number.isInteger(listingId) || listingId <= 0) {
+            return res.status(400).json({ error: "A valid listing ID is required." });
+        }
+
+        const listing = await etsyService.getListing(listingId);
+        const updatedListing = await etsyService.updateListingKeywords(listingId, {
+            title,
+            tags,
+        });
+        const performance = performanceTracker.recordUpdate({
+            listingId,
+            title: updatedListing?.title || title,
+            viewsBefore: listing.views,
+            favoritesBefore: listing.num_favorers,
+            source: "keyword-update",
+            updatedBy: req.teamUser?.username || "unknown",
+            experiment: {
+                name: "SEO test",
+                endsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+                queryTerms: [
+                    "moroccan arched wall mirror",
+                    "gold arched wall mirror",
+                ],
+            },
+        });
+
+        return res.json({
+            success: true,
+            listingId,
+            title: updatedListing?.title || title,
+            tags: Array.isArray(updatedListing?.tags) ? updatedListing.tags : tags,
+            previous: {
+                title: listing.title,
+                tags: listing.tags,
+                views: listing.views,
+                favorites: listing.num_favorers,
+            },
+            performance,
+            updatedListing,
+        });
+    } catch (error) {
+        console.error("Update Etsy keywords error:", error.response?.data || error.message);
+        return res.status(error.response?.status || 400).json({
+            error: getErrorMessage(error, "Failed to update Etsy title and tags."),
+        });
+    }
+}
+
 module.exports = {
     redirectToEtsy,
     handleCallback,
     getCurrentUser,
     getActiveListings,
+    getShopDashboard,
+    getListingImages,
     refreshToken,
     rewriteListingDescription,
     previewListingDescription,
     updateListingDescription,
     getPerformance,
     importLegacyPerformance,
+    researchMarket,
+    updateListingTags,
+    updateListingKeywords,
 };

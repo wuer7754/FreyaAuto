@@ -11,6 +11,10 @@ The project demonstrates an end-to-end applied AI system rather than a standalon
 - Publishes approved descriptions through the Etsy API.
 - Rotates selected description templates on a configurable weekly schedule.
 - Captures view-count baselines and subsequent snapshots after listing updates.
+- Samples public Etsy search results to compare repeated competitor tags and visible discounts.
+- Lets editors review and publish an Etsy-compliant set of up to 13 listing tags.
+- Prepares listing-level promotion plans and hands final sale creation to Etsy Shop Manager.
+- Publishes reviewed Etsy product images to Buffer-connected Instagram and Facebook channels.
 - Provides update history and performance views for ongoing experiments.
 - Protects the workspace with private team accounts and role-based permissions.
 - Supports light and dark themes in a responsive React interface.
@@ -84,11 +88,25 @@ See [TEAM_SETUP.md](TEAM_SETUP.md) for roles and production security notes.
 | `ETSY_CLIENT_ID` | Etsy OAuth application ID |
 | `ETSY_CLIENT_SECRET` | Etsy OAuth secret |
 | `ETSY_REDIRECT_URI` | Etsy OAuth callback URL |
+| `ETSY_MARKET_COUNTRY` | Buyer country used for public discount-price research (default `US`) |
+| `ETSY_MARKET_CURRENCY` | Currency used for public market-price research (default `USD`) |
 | `OPENAI_API_KEY` | OpenAI API access |
 | `ETSY_PROXY_URL` | Optional Etsy-specific outbound proxy |
 | `OPENAI_PROXY_URL` | Optional OpenAI-specific outbound proxy |
+| `BUFFER_API_KEY` | Personal API key from Buffer Settings → API |
+| `BUFFER_ORGANIZATION_ID` | Optional Buffer workspace override; the first workspace is used by default |
+| `BUFFER_INSTAGRAM_CHANNEL_ID` | Optional Instagram channel override when Buffer has multiple Instagram accounts |
+| `BUFFER_FACEBOOK_CHANNEL_ID` | Optional Facebook Page channel override when Buffer has multiple Facebook Pages |
+| `BUFFER_PINTEREST_CHANNEL_ID` | Optional Pinterest channel override when Buffer has multiple Pinterest accounts |
+| `BUFFER_PINTEREST_BOARD_ID` | Optional default Pinterest board service ID |
+| `SOCIAL_MEDIA_PUBLIC_BASE_URL` | Public HTTPS origin Buffer uses to retrieve images uploaded from the computer |
+| `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_BUCKET` | Cloudflare R2 credentials and bucket for uploaded social images |
 
 Never commit `.env`, OAuth tokens, team-user records, or performance data. The repository's `.gitignore` excludes these runtime files.
+
+Etsy's public API does not expose a shop's private search-term traffic report or an endpoint for creating sales and coupons. The Search & Promotions workspace therefore labels public result frequency as a relevance signal—not search volume—and sends promotion plans to Etsy Shop Manager for final review.
+
+The Social Publisher sends public Etsy images or images uploaded from the computer through Buffer's API to Instagram and Facebook. One post can contain up to 10 images, and the seven-day planner can batch-upload images into editable date/time slots before scheduling them in Buffer. Uploaded images are validated as JPG, PNG, or WebP, limited to 10 MB each, and stored in Cloudflare R2 before Buffer receives their public URL. Connect the social accounts in Buffer first, then create a personal API key in Buffer Settings → API. It creates organic posts only; it does not create paid campaigns, assign audiences, set budgets, or access billing.
 
 ## Quality checks
 

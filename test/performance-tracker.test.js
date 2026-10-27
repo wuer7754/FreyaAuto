@@ -63,3 +63,38 @@ test("weekly rotation creates shared history and resets latest baseline", () => 
     assert.equal(data.records[0].baselineViews, 106);
     assert.equal(data.records[0].templateId, "minimal");
 });
+
+test("daily batch records three listings and advances to the next three tomorrow", () => {
+    const ids = [201, 202, 203, 204, 205, 206];
+    ids.forEach((listingId) => {
+        tracker.recordUpdate({
+            listingId,
+            title: `Mirror ${listingId}`,
+            viewsBefore: 10,
+            updatedAt: "2026-09-01T00:00:00.000Z",
+        });
+    });
+    const listings = ids.map((listingId, index) => ({
+        listing_id: listingId,
+        title: `Mirror ${listingId}`,
+        views: 20 + index,
+    }));
+
+    const first = tracker.syncNextDailyBatch(
+        listings,
+        new Date("2026-09-02T19:00:00.000Z")
+    );
+    assert.deepEqual(first.batch.map((record) => record.listingId), [206, 205, 204]);
+
+    const repeat = tracker.syncNextDailyBatch(
+        listings,
+        new Date("2026-09-02T21:00:00.000Z")
+    );
+    assert.equal(repeat.skipped, true);
+
+    const second = tracker.syncNextDailyBatch(
+        listings,
+        new Date("2026-09-03T19:00:00.000Z")
+    );
+    assert.deepEqual(second.batch.map((record) => record.listingId), [203, 202, 201]);
+});
